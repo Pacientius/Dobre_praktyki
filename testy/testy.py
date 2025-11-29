@@ -1,17 +1,5 @@
-#from fastapi.testclient import TestClient
-#import sys
-#import os
-
-# Dodaj folder projektu do sys.path, żeby Python znalazł moduł api
-#sys.path.append(os.path.abspath("C:/Users/hubgr/Desktop/Studia/dobre_praktyki_programowania"))
-
-# Teraz importujemy FastAPI app z main.py
-#from api.main import app
-
-#client = TestClient(app)
-
 from fastapi.testclient import TestClient
-from .main import app
+from api.main import app
 
 client = TestClient(app)
 

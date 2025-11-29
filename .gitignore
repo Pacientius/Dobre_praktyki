@@ -1,5 +1,5 @@
-api/__pycache__
-api\__pycache__
-.idea
-.pytest_cache
-venv
+**/__pycache__/
+**/.pytest_cache/
+**/.idea/
+**/venv/
+movies.db
