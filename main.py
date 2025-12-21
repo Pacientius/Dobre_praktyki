@@ -5,11 +5,10 @@ import time
 from consumer import start_consumer
 
 
-
 def produce_100_tasks():
     print("[MAIN] Generuję.")
     for x in range(100):
-        subprocess.run(["python", "producer.py"])
+        subprocess.run([sys.executable, "producer.py"])
 
     print("[MAIN] Dodano")
 
@@ -19,7 +18,6 @@ try:
 except subprocess.CalledProcessError as e:
     print(f"[MAIN] Błąd podczas uruchamiania duzo.py: {e}")
 """
-
 
 produce_100_tasks()
 
