@@ -1,4 +1,4 @@
-import csv
+import sqlite3
 import os
 import time
 import threading
@@ -9,7 +9,7 @@ import random
 czas = random.randint(15, 30)
 
 
-FILE = "tasks.csv"
+DB_FILE = "tasks.db"
 
 RAM_QUEUE_SIZE = 10
 task_queue = Queue(maxsize=RAM_QUEUE_SIZE)
@@ -19,47 +19,54 @@ THREAD_COUNT = max(1, CPU_COUNT - 1)
 
 LOCK = threading.Lock()
 
+event = threading.Event()
+
 
 def read_tasks():
-    with open(FILE, "r") as f:
-        return list(csv.reader(f))
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, status FROM tasks ORDER BY id")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
 
 
-def write_tasks(rows):
-    with open(FILE, "w", newline="") as f:
-        csv.writer(f).writerows(rows)
+def update_task_status(task_id, status):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
+    conn.commit()
+    conn.close()
 
 
 def load_pending_tasks():
     while True:
+        if event.is_set():
+            break 
+
         if task_queue.full():
             time.sleep(1)
             continue
 
         with LOCK:
-            rows = read_tasks()
-            added = False
-
-            for i in range(1, len(rows)):
-                task_id, status = rows[i]
-                if status == "pending":
-                    rows[i][1] = "in_progress"
-                    write_tasks(rows)
-
-                    task_queue.put((task_id, i))
-                    print(f"[LOADER] Załadowano zadanie {task_id} do RAM")
-                    added = True
-                    break
-
-        if not added:
-            time.sleep(2)
-
-
-def finish_task(row_index):
-    with LOCK:
-        rows = read_tasks()
-        rows[row_index][1] = "done"
-        write_tasks(rows)
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM tasks WHERE status = 'pending' LIMIT 1")
+            row = cursor.fetchone()
+            
+            if row:
+                task_id = row[0]
+                cursor.execute("UPDATE tasks SET status = 'in_progress' WHERE id = ?", (task_id,))
+                conn.commit()
+                conn.close()
+                
+                task_queue.put(task_id)
+                print(f"[LOADER] Załadowano zadanie {task_id}")
+            else:
+                conn.close()
+                time.sleep(2)
+def finish_task(task_id):
+    update_task_status(task_id, "done")
 
 
 def worker():
@@ -68,7 +75,7 @@ def worker():
 
     while True:
         try:
-            task_id, row_index = task_queue.get(timeout=1)
+            task_id = task_queue.get(timeout=1)
         except:
             time.sleep(1)
             continue
@@ -76,18 +83,29 @@ def worker():
         czas = random.randint(15, 30)
 
         print(
-            f"[WORKER {threading.get_ident()}] Start zadania {task_id} (czas: {czas}s)"
+            f"[WORKER {threading.get_ident()}] Start {task_id} (czas: {czas}s)"
         )
 
         time.sleep(czas)
 
-        finish_task(row_index)
+        finish_task(task_id)
 
         print(
-            f"[WORKER {threading.get_ident()}] Koniec zadania {task_id} (czas: {czas}s)"
+            f"[WORKER {threading.get_ident()}] Koniec {task_id} (czas: {czas}s)"
         )
 
         task_queue.task_done()
+
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM tasks WHERE status != 'done'")
+        count = cursor.fetchone()[0]
+        conn.close()
+        if count == 0:
+            print("[WORKER] Wszystkie zadania przetworzone, kończę program.")
+            event.set()
+            break  
 
 
 
@@ -99,7 +117,7 @@ def start_consumer():
     for _ in range(THREAD_COUNT):
         threading.Thread(target=worker, daemon=True).start()
 
-    while True:
+    while not event.is_set():
         time.sleep(1)
 
 

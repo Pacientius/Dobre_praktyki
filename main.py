@@ -1,25 +1,18 @@
-# main.py
-import subprocess
-import sys
-import time
-from consumer import start_consumer
+
+from consumer import start_consumer 
+from producer import add_tasks_bulk  
 
 
 def produce_100_tasks():
-    print("[MAIN] Generuję.")
-    for x in range(100):
-        subprocess.run([sys.executable, "producer.py"])
+    print("[MAIN] Generuję 100 zadań.")  
+    add_tasks_bulk(100)  
+    print("[MAIN] Dodano 100 zadań") 
 
-    print("[MAIN] Dodano")
 
-"""
-try:
-    subprocess.run([sys.executable, "duzo.py"], check=True)
-except subprocess.CalledProcessError as e:
-    print(f"[MAIN] Błąd podczas uruchamiania duzo.py: {e}")
-"""
+if __name__ == "__main__":
 
-produce_100_tasks()
+    produce_100_tasks()
 
-print("[MAIN] Uruchamiam consumerów...")
-start_consumer()
+
+    print("[MAIN] Uruchamiam consumerów...")
+    start_consumer() 

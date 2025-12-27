@@ -1,33 +1,55 @@
-import csv
+import sqlite3
 import os
 
-FILE = "tasks.csv"
+DB_FILE = "tasks.db"
 
 
-def ensure_file():
-    if not os.path.exists(FILE):
-        with open(FILE, "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["id", "status"])
+def ensure_db():
+    if not os.path.exists(DB_FILE):
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE tasks (
+                id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL
+            )
+        ''')
+        conn.commit()
+        conn.close()
 
 
 def add_task():
-    ensure_file()
-
-    with open(FILE, "r") as f:
-        rows = list(csv.reader(f))
-
-    if len(rows) <= 1:
-        new_id = 1
-    else:
-        last_id = int(rows[-1][0])
-        new_id = last_id + 1
-
-    with open(FILE, "a", newline="") as f:
-        w = csv.writer(f)
-        w.writerow([new_id, "pending"])
-
+    ensure_db()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT MAX(id) FROM tasks")
+    result = cursor.fetchone()
+    new_id = (result[0] or 0) + 1
+    
+    cursor.execute("INSERT INTO tasks (id, status) VALUES (?, ?)", (new_id, "pending"))
+    conn.commit()
+    conn.close()
+    
     print(f"[PRODUCER] Dodano zadanie {new_id}")
 
 
-add_task()
+def add_tasks_bulk(count):
+    ensure_db()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT MAX(id) FROM tasks")
+    result = cursor.fetchone()
+    start_id = (result[0] or 0) + 1
+    
+    tasks = [(start_id + i, "pending") for i in range(count)]
+    cursor.executemany("INSERT INTO tasks (id, status) VALUES (?, ?)", tasks)
+    conn.commit()
+    conn.close()
+    
+    print(f"[PRODUCER] Dodano {count} zadań")
+
+
+if __name__ == "__main__":
+    add_task()
