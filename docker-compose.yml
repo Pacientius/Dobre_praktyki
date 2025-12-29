@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq-server
+    restart: always
+    ports:
+      - "5672:5672"   
+      - "15672:15672" 
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    networks:
+      - vision-network
+
+  mysql:
+    image: mysql:8.0
+    container_name: mysql-db
+    restart: always
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: password  
+      MYSQL_DATABASE: vision_db
+    networks:
+      - vision-network
+
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: phpmyadmin-web
+    restart: always
+    ports:
+      - "8082:80" 
+    environment:
+      PMA_HOST: mysql-db
+      MYSQL_ROOT_PASSWORD: password
+    networks:
+      - vision-network
+    depends_on:
+      - mysql
+
+networks:
+  vision-network:
+    driver: bridge

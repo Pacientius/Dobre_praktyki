@@ -1,0 +1,15 @@
+flask
+opencv-python
+cvlib
+tensorflow
+requests
+mysql-connector-python
+fastapi 
+uvicorn 
+pika 
+python-dotenv
+imutils
+pytest
+httpx
+pytest
+ultralytics
