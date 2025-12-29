@@ -41,37 +41,6 @@ def detect_people(url):
 
         img = cv2.resize(img, (1280, int(img.shape[0] * 1280 / img.shape[1])))
 
-        
-
-
-        boxes, weights = hog.detectMultiScale(
-            img,
-            winStride=(4, 4),    
-            padding=(8, 8),     
-            scale=1.1,           
-            hitThreshold=-0.5     
-        )  
-        """ 
-       boxes, weights = hog.detectMultiScale(
-            img,
-            winStride=(8, 8),
-            padding=(8, 8),
-            scale=1.05
-        )
-        """
-
-        boxes = np.array([[x, y, x + w, y + h] for (x, y, w, h) in boxes])
-
-
-        rects = []
-        for i in range(len(boxes)):
-            rects.append(boxes[i].tolist())
-        rects_np = np.array(rects)
-        pick = cv2.dnn.NMSBoxes(rects, [float(w) for w in weights], score_threshold=0.4, nms_threshold=0.6)
-        person_count = len(pick) if pick is not None else 0
-
-        print(f" [*] Znaleziono osób: {person_count}")
-
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
 
