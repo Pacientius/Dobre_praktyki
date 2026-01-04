@@ -1,107 +1,214 @@
-import pika
+import redis
 import json
+import time
+import uuid
+import httpx
 import cv2
 import numpy as np
 import urllib.request
-import mysql.connector
 import config
+from tenacity import retry, wait_exponential, stop_after_attempt
+import os
+import urllib.request
+from urllib.parse import urlparse
+
+QUEUE_MAIN = "AI_queue"
+QUEUE_PROCESSING = "AI_queue_temp"
+
+SERVICE_A_URL = f"http://{config.SERVICE_A_HOST}:{config.SERVICE_A_PORT}/save"
+
+#temp
+count = 1
+x=0
+
+
+
+#AI
 
 hog = cv2.HOGDescriptor()
 hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 
-def save_to_db(url, count):
+def is_valid_url(url: str) -> bool:
     try:
-        conn = mysql.connector.connect(
-            host=config.DB_HOST,
-            port=config.DB_PORT,
-            user=config.DB_USER,
-            password=config.DB_PASS,
-            database=config.DB_NAME
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except:
+        return False
+
+def detect_people(url: str) -> int:
+    if not is_valid_url(url):
+        print(f" [!] Błąd: To nie jest poprawny URL: {url}")
+        return 0
+
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0"}
         )
-        cursor = conn.cursor()
-        query = "INSERT INTO detections (image_url, people_count) VALUES (%s, %s)"
-        cursor.execute(query, (url, count))
-        conn.commit()
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        print(f" [!] Błąd zapisu do bazy: {e}")
-
-
-def detect_people(url):
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        resp = urllib.request.urlopen(req, timeout=10)
-        image_np = np.asarray(bytearray(resp.read()), dtype="uint8")
+        
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            content_type = resp.info().get_content_type()
+            if not content_type.startswith('image/'):
+                print(f" [!] Błąd: URL nie prowadzi do obrazu (Typ: {content_type})")
+                return 0
+                
+            image_np = np.asarray(bytearray(resp.read()), dtype="uint8")
+            
         img = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
 
         if img is None:
-            print(" [!] Nie udało się wczytać obrazu")
+            print(" [!] Błąd: Nie udało się zdekodować obrazu")
             return 0
 
-        img = cv2.resize(img, (1280, int(img.shape[0] * 1280 / img.shape[1])))
-
+        height, width = img.shape[:2]
+        img = cv2.resize(img, (1280, int(height * (1280 / width))))
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
 
         boxes, weights = hog.detectMultiScale(
             gray,
             winStride=(4, 4),
             padding=(8, 8),
             scale=1.1,
-            hitThreshold=-0.5
+            hitThreshold=-0.5,
         )
 
-        boxes = np.array([[x, y, x + w, y + h] for (x, y, w, h) in boxes])
+        rects = np.array([[x, y, x + w, y + h] for (x, y, w, h) in boxes])
+        pick = cv2.dnn.NMSBoxes(
+            rects.tolist(),
+            [float(w) for w in weights],
+            score_threshold=0.4,
+            nms_threshold=0.6,
+        )
 
-
-        rects = [b.tolist() for b in boxes]
-        pick = cv2.dnn.NMSBoxes(rects, [float(w) for w in weights], score_threshold=0.4, nms_threshold=0.6)
-        person_count = len(pick) if pick is not None else 0
-
-        print(f" [*] Znaleziono osób: {person_count}")
-
-
-
-
-
-
-
-
-
-
-
-        return person_count
+        return len(pick) if len(pick) > 0 else 0
 
     except Exception as e:
-        print(f" [!] Błąd detekcji: {e}")
+        print(f" [!] AI error: {e}")
         return 0
 
-def callback(ch, method, properties, body):
-    data = json.loads(body)
-    url = data['url']
-    print(f" [*] Przetwarzanie: {url}")
-
-    count = detect_people(url)
-    save_to_db(url, count)
-
-    print(f" [v] Gotowe. Znaleziono osób: {count}")
-    ch.basic_ack(delivery_tag=method.delivery_tag)
 
 
-def start_worker():
-    credentials = pika.PlainCredentials(config.RABBIT_USER, config.RABBIT_PASS)
-    connection = pika.BlockingConnection(
-        pika.ConnectionParameters(host=config.RABBIT_HOST, port=config.RABBIT_PORT, credentials=credentials)
+
+
+
+
+
+
+
+
+
+#siec
+
+
+
+@retry(
+    wait=wait_exponential(multiplier=2, min=4, max=60),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+def send_result(task_id: str, url: str, count: int):
+    payload = {
+        "uid": task_id,
+        "url": url,
+        "count": count,
+    }
+    with httpx.Client(timeout=10) as client:
+        response = client.post(SERVICE_A_URL, json=payload)
+        response.raise_for_status()
+
+    
+
+
+
+
+def update_status(r: redis.Redis, task_id: str, status: str, url: str, count=None):
+    print(" Aktualizacja statusu zadania w Redisie")
+    data = {
+        "id": task_id,
+        "status": status,
+        "url": url,
+        "updated_at": time.asctime(),
+    }
+    if count is not None:
+        data["count"] = count
+
+    r.set(task_id, json.dumps(data), ex=1200) #3600 godzina
+
+#uwuanie dziwnych statusow zadan
+def get_task_status(r: redis.Redis, task_id: str) -> str:
+    data = r.get(task_id)
+    if not data:
+        r.rpop (task_id)
+        return "not_found"
+
+
+def start_consumer():  
+    print(" [*] Consumer started")
+
+    r = redis.Redis(
+        host=config.REDIS_HOST,
+        port=config.REDIS_PORT,
+        decode_responses=True,
     )
-    channel = connection.channel()
-    channel.queue_declare(queue='vision_tasks', durable=True)
+    print (" [*] Połączono z Redisem")
 
-    channel.basic_qos(prefetch_count=1)
-    channel.basic_consume(queue='vision_tasks', on_message_callback=callback)
+    while True:
 
-    print(" [*] Consumer uruchomiony. Czekam na zadania...")
-    channel.start_consuming()
+        task_id = r.brpoplpush(
+            QUEUE_MAIN, 
+            QUEUE_PROCESSING,
+            timeout=0,
+            )
+
+        if task_id is None:
+            print(" [*] Kolejka pusta. Zamykanie.")
+            os._exit(0)
+
+
+
+        try:
+            if not r.exists(task_id):
+                print(f" [!] Zadanie {task_id} wygasło lub usunięte. Usuwam z {QUEUE_PROCESSING}.")
+                r.lrem(QUEUE_PROCESSING, 1, task_id)
+                continue
+
+            
+            #data = r.hgetall(task_id)
+            data = json.loads(r.get(task_id))
+            task_id = data["id"]
+            url = data["url"]
+            status= data["status"]
+
+
+            #czy zły url
+            if not is_valid_url(url):
+                raise ValueError(f"Nieprawidłowy URL: {url}")
+            
+            if status == "done":
+                    print(" [i] Zadanie już oznaczone jako done pomijam aktualizację statusu.")
+                    
+
+            elif status != "done":
+                    count = detect_people(url)
+                    update_status(r, task_id, "done", url, count)
+
+            send_result(task_id, url, count)
+            r.lrem(QUEUE_PROCESSING, 1, task_id)
+            r.delete(task_id)
+            print(f" [✓] Task {task_id} done and removed from processing") 
+
+        
+        except (ValueError, json.JSONDecodeError) as e:
+            print(f" [!] Błąd krytyczny usuwam zadanie: {e}")
+            r.lrem(QUEUE_PROCESSING, 1, task_id)
+            r.delete(task_id)
+
+        except Exception as e:
+            print(f"[!]erooroooo: {e}")
+            r.lpush(QUEUE_MAIN, task_id)
+            r.lrem(QUEUE_PROCESSING, 1, task_id)
+            time.sleep(5)
+        
+
 
 if __name__ == "__main__":
-    start_worker()
+    start_consumer()

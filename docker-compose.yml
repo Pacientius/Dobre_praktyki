@@ -1,45 +1,101 @@
-version: '3.8'
-
 services:
-  rabbitmq:
-    image: rabbitmq:3-management
-    container_name: rabbitmq-server
-    restart: always
-    ports:
-      - "5672:5672"   
-      - "15672:15672" 
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
-    networks:
-      - vision-network
-
-  mysql:
+  db:
     image: mysql:8.0
     container_name: mysql-db
     restart: always
-    ports:
+    ports: 
       - "3306:3306"
     environment:
-      MYSQL_ROOT_PASSWORD: password  
-      MYSQL_DATABASE: vision_db
-    networks:
-      - vision-network
+      MYSQL_ROOT_PASSWORD: ${DB_PASS}
+      MYSQL_DATABASE: ${DB_NAME}
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASS}"]
+      interval: 10s
+      retries: 60
+      timeout: 10s
+      start_period: 45s
 
   phpmyadmin:
-    image: phpmyadmin:latest
-    container_name: phpmyadmin-web
-    restart: always
-    ports:
-      - "8082:80" 
-    environment:
-      PMA_HOST: mysql-db
-      MYSQL_ROOT_PASSWORD: password
-    networks:
-      - vision-network
-    depends_on:
-      - mysql
+     image: phpmyadmin:latest
+     container_name: phpmyadmin-web
+     restart: always
+     ports:
+       - "8103:80"
+     environment:
+       - PMA_HOST=db
+       - PMA_PORT=3306
+       - MYSQL_ROOT_PASSWORD=${DB_PASS}
+     depends_on:
+       db:
+         condition: service_healthy
 
-networks:
-  vision-network:
-    driver: bridge
+  redis:
+    image: redis:7-alpine
+    container_name: redis-db
+    ports:
+      - "6379:6379"
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: redis-commander
+    restart: always
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8101:8081"
+    depends_on:
+      - redis
+      
+  redis-insight:
+    image: redis/redisinsight:latest
+    container_name: redis-insight
+    ports:
+      - "8102:5540"
+    depends_on:
+      - redis
+
+
+
+
+  main:
+    build: .  
+    ports:
+      - "8100:8000"
+    volumes:
+      - .:/app
+    env_file: .env
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 3
+
+
+  service_a:
+    build: .
+    volumes:
+      - .:/app
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    command: uvicorn service_a:app --host 0.0.0.0 --port 8101 
+
+
+  service_b:
+    build: .
+    volumes:
+      - .:/app
+    env_file: .env
+    depends_on:
+      - redis
+    command: uvicorn service_b:app --host 0.0.0.0 --port 8102 
+
+
+  consumer:
+    build: .
+    volumes:
+      - .:/app
+    env_file: .env
+    deploy:
+      replicas: 2
+    depends_on:
+      - redis
+      - main
+    command: python consumer.py
