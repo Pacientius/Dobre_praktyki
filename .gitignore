@@ -1,7 +1,8 @@
-.env
-rabbit_data/
-db_data/
 __pycache__/
-*.pyc
-venv
-.pytest_cache
+.venv/
+.env
+.idea/
+.vscode/
+.pytest_cache/
+.tmp/
+.old/

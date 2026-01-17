@@ -41,8 +41,21 @@ async def init_db():
             )
         """
         cursor.execute(query)
+        
+        # Tabela dla wyników OCR
+        ocr_query = """
+            CREATE TABLE IF NOT EXISTS ocr_results (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                uid VARCHAR(36),
+                image_url TEXT,
+                plate_number VARCHAR(20),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """
+        cursor.execute(ocr_query)
+        
         conn.commit()
-        print(f" [v] Sukces: Baza '{config.DB_NAME}' i tabela 'detections' są gotowe.")
+        print(f" [v] Sukces: Baza '{config.DB_NAME}' i tabele 'detections', 'ocr_results' są gotowe.")
         
     except Exception as e:
         print(f" [!] Błąd inicjalizacji bazy: {e}")

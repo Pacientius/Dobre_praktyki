@@ -94,8 +94,20 @@ services:
       - .:/app
     env_file: .env
     deploy:
-      replicas: 2
+      replicas: 1
     depends_on:
       - redis
       - main
     command: python consumer.py
+
+  ocr_consumer:
+    build: .
+    volumes:
+      - .:/app
+    env_file: .env
+    deploy:
+      replicas: 1
+    depends_on:
+      - redis
+      - main
+    command: python ocr_consumer.py

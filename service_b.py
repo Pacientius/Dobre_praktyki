@@ -33,6 +33,27 @@ async def enqueue_task(payload: AnalyzeRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Błąd kolejkowania: {str(e)}")
 
+
+@app.post("/queue_ocr", status_code=201)
+async def enqueue_ocr_task(payload: AnalyzeRequest):
+    try:
+        task_id = str(uuid.uuid4())
+
+        job_data = {
+            "id": task_id,
+            "status": "queued",
+            "url": payload.url,
+            "created_at": time.asctime()
+        }
+
+        r.set(task_id, json.dumps(job_data), ex=3600)
+        r.lpush("OCR_queue", task_id)
+
+        return {"status": "success", "data": job_data, "queue": "OCR_queue"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd kolejkowania OCR: {str(e)}")
+
     
 @app.get("/status/{task_id}")
 async def get_status(task_id: str):

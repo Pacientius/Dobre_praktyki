@@ -12,6 +12,11 @@ class DetectionResult(BaseModel):
     url: str
     count: int
 
+class OCRResult(BaseModel):
+    uid: str
+    url: str
+    plate_number: str
+
 def get_db_connection():
     return mysql.connector.connect(
         host=config.DB_HOST,
@@ -72,6 +77,36 @@ async def save_result(payload: DetectionResult):
         print(f" [!] Błąd połączenia z bazą danych MySQL: {err}")
         raise HTTPException(status_code=500, detail=f"Błąd połączenia z bazą danych: {err}")
 
+    except mysql.connector.Error as err:
+        print(f" [!] Błąd bazy danych MySQL: {err}")
+        raise HTTPException(status_code=500, detail=f"Błąd bazy danych: {err}")
+    except Exception as e:
+        print(f" [!] Nieoczekiwany błąd: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn and conn.is_connected():
+            conn.close()
+
+
+@app.post("/save_ocr", status_code=201)
+async def save_ocr_result(payload: OCRResult):
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        query = """
+            INSERT INTO ocr_results (uid, image_url, plate_number) 
+            VALUES (%s, %s, %s)
+        """
+        values = (payload.uid, payload.url, payload.plate_number)
+
+        cursor.execute(query, values)
+        conn.commit()
+
+        cursor.close()
+        return {"status": "success", "data": {"uuid": payload.uid, "url": payload.url, "plate_number": payload.plate_number}}
+        
     except mysql.connector.Error as err:
         print(f" [!] Błąd bazy danych MySQL: {err}")
         raise HTTPException(status_code=500, detail=f"Błąd bazy danych: {err}")
