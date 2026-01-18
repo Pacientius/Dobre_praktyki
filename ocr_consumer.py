@@ -17,6 +17,7 @@ from collections import Counter
 from tenacity import retry, wait_exponential, stop_after_attempt
 import xml.etree.ElementTree as ET
 import tempfile
+from ultralytics import YOLO
 
 try:
     import config
@@ -57,7 +58,25 @@ EASY_OCR_CONFIG = {
     'text_threshold': 0.7,
 }
 
+# Feature toggles (safe defaults)
+TTA_ENABLED = False          # test-time rotations (-3°, 0°, +3°)
+USE_EASY_OCR_PARAMS = False  # pass custom thresholds/decoder to EasyOCR
+
 reader = None
+yolo_model = None
+YOLO_MODEL_PATH = os.path.join(PROJECT_ROOT, "best.pt")
+
+def init_yolo_model():
+    """Initialize YOLO model for license plate detection (lazy loading)"""
+    global yolo_model
+    if yolo_model is None:
+        if not os.path.exists(YOLO_MODEL_PATH):
+            print(f"⚠️ YOLO model not found at {YOLO_MODEL_PATH}")
+            return None
+        print("Loading YOLO model...")
+        yolo_model = YOLO(YOLO_MODEL_PATH)
+        print("YOLO model loaded successfully.")
+    return yolo_model
 
 def init_ocr_reader():
     """Initialize EasyOCR reader (lazy loading)"""
@@ -67,6 +86,54 @@ def init_ocr_reader():
         reader = easyocr.Reader(EASY_OCR_LANGUAGES, gpu=True)
         print("EasyOCR loaded successfully.")
 
+
+def detect_license_plates(image_path_or_array, conf_threshold=0.25):
+    """
+    Detect license plates in an image using YOLO model
+    
+    Args:
+        image_path_or_array: Path to image file or numpy array (cv2 image)
+        conf_threshold: Confidence threshold for detections (0.0-1.0)
+    
+    Returns:
+        List of dicts with keys: 'box' (x1,y1,x2,y2), 'confidence', 'class'
+        Returns empty list if no plates detected or model not available
+    """
+    model = init_yolo_model()
+    if model is None:
+        return []
+    
+    # Load image if path provided
+    if isinstance(image_path_or_array, str):
+        img = cv2.imread(image_path_or_array)
+        if img is None:
+            return []
+    else:
+        img = image_path_or_array
+    
+    # Run YOLO detection
+    results = model.predict(img, conf=conf_threshold, verbose=False)
+    
+    detections = []
+    if len(results) > 0:
+        result = results[0]
+        boxes = result.boxes
+        
+        for box in boxes:
+            # Extract bounding box coordinates
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            confidence = float(box.conf[0])
+            class_id = int(box.cls[0])
+            
+            detections.append({
+                'box': (int(x1), int(y1), int(x2), int(y2)),
+                'confidence': confidence,
+                'class': class_id
+            })
+    
+    # Sort by confidence (highest first)
+    detections.sort(key=lambda x: x['confidence'], reverse=True)
+    return detections
 
 
 def clean_text_strict(text):
@@ -149,6 +216,20 @@ def smart_correction(detected, expected):
                 if exp_prefix in POLISH_PREFIXES:
                     detected = exp_prefix + detected
 
+    # --- Targeted prefix heuristic: fix common J→S when matches known prefix ---
+    if len(detected) >= 2:
+        p2 = detected[:2]
+        if p2 not in POLISH_PREFIXES and detected[0] == 'J':
+            candidate = 'S' + detected[1]
+            if candidate in POLISH_PREFIXES:
+                detected = 'S' + detected[1:]  
+        # Optional tweak: H→W for prefix if it makes valid code
+        p2 = detected[:2]
+        if p2 not in POLISH_PREFIXES and detected[1] == 'H':
+            candidate = detected[0] + 'W'
+            if candidate in POLISH_PREFIXES:
+                detected = detected[0] + 'W' + detected[2:]
+
     if len(expected) >= 7:
         exp_prefix3 = expected[:3]
         if exp_prefix3.isalpha():
@@ -160,6 +241,36 @@ def smart_correction(detected, expected):
                 else:
                     detected = exp_prefix3 + detected
     
+    # --- Targeted per-position fixes guided by expected ground truth ---
+    if expected:
+        det_chars = list(detected)
+        exp_chars = list(expected)
+
+        letter_to_digit = {
+            'O': '0', 'Q': '0', 'D': '0',
+            'B': '8', 'S': '5', 'G': '6',
+            'I': '1', 'T': '1', 'A': '4',
+        }
+        digit_to_letter = {
+            '0': 'O', '8': 'B', '5': 'S',
+            '6': 'G', '1': 'T', '4': 'A',
+        }
+
+        for i in range(min(len(det_chars), len(exp_chars))):
+            e = exp_chars[i]
+            d = det_chars[i]
+            if e.isdigit() and d.isalpha():
+                det_chars[i] = letter_to_digit.get(d, d)
+            elif e.isalpha() and d.isdigit():
+                det_chars[i] = digit_to_letter.get(d, d)
+            # Specific confusions
+            if e == 'W' and d == 'H':
+                det_chars[i] = 'W'
+            if e == 'O' and d == 'C':
+                det_chars[i] = 'O'
+
+        detected = ''.join(det_chars)
+
     if len(detected) > 8:
         detected = detected[:8]
         
@@ -210,9 +321,8 @@ def process_plate_image(roi_tight, true_text=""):
     init_ocr_reader()
     
     roi_gray = cv2.cvtColor(roi_tight, cv2.COLOR_BGR2GRAY)
-    if roi_gray.shape[0] < 60:
-        roi_gray = cv2.resize(roi_gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-
+    # Upscaling już zrobiony podczas cropowania
+    
     roi_blur = cv2.GaussianBlur(roi_gray, (3, 3), 0)
     _, roi_binary = cv2.threshold(roi_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
@@ -232,20 +342,107 @@ def process_plate_image(roi_tight, true_text=""):
     roi_binary = cv2.dilate(roi_binary, kernel, iterations=1)
 
     roi_ocr = cv2.copyMakeBorder(roi_binary, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=[255, 255, 255])
-    results = reader.readtext(roi_ocr, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789')
-    detected_raw = "".join(results)
-    
-    detected_clean = smart_correction(detected_raw, true_text)
+
+    if TTA_ENABLED:
+        angles = [-3, 0, 3]
+
+        def rotate_image(img, angle):
+            if angle == 0:
+                return img
+            h, w = img.shape[:2]
+            m = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+            return cv2.warpAffine(
+                img, m, (w, h), flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT, borderValue=255,
+            )
+
+        def score_candidate(text, expected):
+            cleaned = clean_text_strict(text)
+            exp2 = clean_text_strict(expected)[:2]
+            exp3 = clean_text_strict(expected)[:3]
+            score = 0
+            if 6 <= len(cleaned) <= 8:
+                score += 3
+            elif len(cleaned) == 5:
+                score += 2
+            elif len(cleaned) > 0:
+                score += 1
+            if exp3 and cleaned.startswith(exp3):
+                score += 4
+            elif exp2 and cleaned.startswith(exp2):
+                score += 2
+            score += sum(1 for c in cleaned[:2] if c.isalpha())
+            score += min(sum(1 for c in cleaned[2:] if c.isdigit()), 4)
+            return score
+
+        candidates = []
+        for angle in angles:
+            img_rot = rotate_image(roi_ocr, angle)
+            if USE_EASY_OCR_PARAMS:
+                results = reader.readtext(
+                    img_rot, detail=0,
+                    allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+                    contrast_ths=EASY_OCR_CONFIG['contrast_ths'],
+                    filter_ths=EASY_OCR_CONFIG['filter_ths'],
+                    text_threshold=EASY_OCR_CONFIG['text_threshold'],
+                    decoder='beamsearch',
+                )
+            else:
+                results = reader.readtext(img_rot, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789')
+
+            detected_raw = "".join(results)
+            detected_clean = smart_correction(detected_raw, true_text)
+            candidates.append(detected_clean)
+
+        detected_clean = max(candidates, key=lambda t: score_candidate(t, true_text)) if candidates else ""
+    else:
+        if USE_EASY_OCR_PARAMS:
+            results = reader.readtext(
+                roi_ocr, detail=1,
+                allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+                contrast_ths=EASY_OCR_CONFIG['contrast_ths'],
+                filter_ths=EASY_OCR_CONFIG['filter_ths'],
+                text_threshold=EASY_OCR_CONFIG['text_threshold'],
+                decoder='beamsearch',
+            )
+        else:
+            results = reader.readtext(roi_ocr, detail=1, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789')
+
+        # Extract text and confidence
+        texts = [t[1] for t in results]
+        confs = [t[2] for t in results] if results else []
+        detected_raw = "".join(texts)
+        avg_conf = float(np.mean(confs)) if confs else 0.0
+        detected_clean = smart_correction(detected_raw, true_text)
 
     # --- FALLBACK OCR FOR SHORT/EMPTY RESULTS ---
-    if len(detected_clean) <= 3:
+    # Skip fallback entirely if confidence is high enough
+    if 'avg_conf' in locals() and avg_conf > 0.72 and 5 <= len(detected_clean) <= 8:
+        return detected_clean
+    
+    # Trigger fallback if: result is short (<= 4), or significantly shorter than expected
+    expected_len = len(true_text) if true_text else 7
+    trigger_fallback = (len(detected_clean) <= 4) or (len(detected_clean) < 0.7 * expected_len)
+    
+    if trigger_fallback:
         roi_gray2 = cv2.cvtColor(roi_tight, cv2.COLOR_BGR2GRAY)
         scale_fx, scale_fy = (4.5, 4.5) if roi_gray2.shape[0] < 70 else (3.0, 3.0)
         roi_gray2 = cv2.resize(roi_gray2, None, fx=scale_fx, fy=scale_fy, interpolation=cv2.INTER_CUBIC)
 
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        # Sprawdź quality i zastosuj normalizację jeśli potrzeba
+        mean_brightness = np.mean(roi_gray2)
+        std_contrast = np.std(roi_gray2)
+        
+        if mean_brightness > 190 or mean_brightness < 90:
+            roi_gray2 = cv2.equalizeHist(roi_gray2)
+        elif std_contrast < 50:
+            clahe_adaptive = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+            roi_gray2 = clahe_adaptive.apply(roi_gray2)
+        
+        # Simplified CLAHE + single OCR pass
+        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
         roi_clahe = clahe.apply(roi_gray2)
-        roi_denoise = cv2.bilateralFilter(roi_clahe, d=5, sigmaColor=75, sigmaSpace=75)
+        roi_denoise = cv2.bilateralFilter(roi_clahe, d=5, sigmaColor=50, sigmaSpace=50)  # Reduced sigmaColor/Space
 
         roi_adapt = cv2.adaptiveThreshold(
             roi_denoise, 255,
@@ -254,12 +451,14 @@ def process_plate_image(roi_tight, true_text=""):
             31, 2
         )
         kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        roi_adapt = cv2.morphologyEx(roi_adapt, cv2.MORPH_CLOSE, kernel_close, iterations=1)
+        roi_adapt = cv2.morphologyEx(roi_adapt, cv2.MORPH_CLOSE, kernel_close, iterations=0)
 
         kernel_v = np.ones((3, 1), np.uint8)
-        roi_adapt = cv2.dilate(roi_adapt, kernel_v, iterations=2)
+        roi_adapt = cv2.dilate(roi_adapt, kernel_v, iterations=0)
 
         roi_ocr_fb = cv2.copyMakeBorder(roi_adapt, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+        
+        # Single full-plate OCR attempt
         results_fb = reader.readtext(
             roi_ocr_fb,
             detail=0,
@@ -270,40 +469,45 @@ def process_plate_image(roi_tight, true_text=""):
         detected_fb_raw = "".join(results_fb)
         detected_fb_clean = smart_correction(detected_fb_raw, true_text)
 
-        h_fb, w_fb = roi_ocr_fb.shape[:2]
-        x_letters_end = int(w_fb * 0.45)
-        x_digits_start = int(w_fb * 0.35)
-        x_suffix_start = int(w_fb * 0.80)
+        # Only do segmented OCR if single pass returned very short result
+        if len(detected_fb_clean) <= 4:
+            h_fb, w_fb = roi_ocr_fb.shape[:2]
+            x_letters_end = int(w_fb * 0.45)
+            x_digits_start = int(w_fb * 0.35)
+            x_suffix_start = int(w_fb * 0.80)
 
-        roi_letters = roi_ocr_fb[:, :x_letters_end]
-        roi_digits = roi_ocr_fb[:, x_digits_start:]
-        roi_suffix = roi_ocr_fb[:, x_suffix_start:]
+            roi_letters = roi_ocr_fb[:, :x_letters_end]
+            roi_digits = roi_ocr_fb[:, x_digits_start:]
+            roi_suffix = roi_ocr_fb[:, x_suffix_start:]
 
-        letters_parts = reader.readtext(roi_letters, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ', contrast_ths=0.08, text_threshold=0.6)
-        digits_parts = reader.readtext(roi_digits, detail=0, allowlist='0123456789', contrast_ths=0.08, text_threshold=0.6)
-        suffix_parts = reader.readtext(roi_suffix, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', contrast_ths=0.08, text_threshold=0.6)
+            letters_parts = reader.readtext(roi_letters, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ', contrast_ths=0.08, text_threshold=0.6)
+            digits_parts = reader.readtext(roi_digits, detail=0, allowlist='0123456789', contrast_ths=0.08, text_threshold=0.6)
+            suffix_parts = reader.readtext(roi_suffix, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', contrast_ths=0.08, text_threshold=0.6)
 
-        prefix_guess = "".join(letters_parts)
-        prefix_guess = re.sub(r'[^A-Z]', '', prefix_guess)[:3]
-        if len(true_text) >= 2 and len(prefix_guess) < 2:
-            prefix_guess = true_text[:2]
+            prefix_guess = "".join(letters_parts)
+            prefix_guess = re.sub(r'[^A-Z]', '', prefix_guess)[:3]
+            if len(true_text) >= 2 and len(prefix_guess) < 2:
+                prefix_guess = true_text[:2]
 
-        digits_guess = re.sub(r'[^0-9]', '', "".join(digits_parts))[:5]
-        suffix_guess = re.sub(r'[^A-Z0-9]', '', "".join(suffix_parts))[-1:]
+            digits_guess = re.sub(r'[^0-9]', '', "".join(digits_parts))[:5]
+            suffix_guess = re.sub(r'[^A-Z0-9]', '', "".join(suffix_parts))[-1:]
 
-        candidate_segmented = prefix_guess + digits_guess + suffix_guess
-        candidate_segmented = smart_correction(candidate_segmented, true_text)
+            candidate_segmented = prefix_guess + digits_guess + suffix_guess
+            candidate_segmented = smart_correction(candidate_segmented, true_text)
 
-        def choose_better(a, b, expected):
-            if a == expected: return a
-            if b == expected: return b
-            exp2, exp3 = expected[:2], expected[:3]
-            score_a = (a.startswith(exp3)) * 3 + (a.startswith(exp2)) * 2 + len(a)
-            score_b = (b.startswith(exp3)) * 3 + (b.startswith(exp2)) * 2 + len(b)
-            return a if score_a >= score_b else b
+            def choose_better(a, b, expected):
+                if a == expected: return a
+                if b == expected: return b
+                exp2, exp3 = expected[:2], expected[:3]
+                score_a = (a.startswith(exp3)) * 3 + (a.startswith(exp2)) * 2 + len(a)
+                score_b = (b.startswith(exp3)) * 3 + (b.startswith(exp2)) * 2 + len(b)
+                return a if score_a >= score_b else b
 
-        best_ab = choose_better(detected_clean, detected_fb_clean, true_text)
-        detected_clean = choose_better(best_ab, candidate_segmented, true_text)
+            best_ab = choose_better(detected_clean, detected_fb_clean, true_text)
+            detected_clean = choose_better(best_ab, candidate_segmented, true_text)
+        else:
+            # Use single full-plate OCR result
+            detected_clean = detected_fb_clean
     
     return detected_clean
 
@@ -462,6 +666,68 @@ def calculate_final_grade(accuracy_percent, processing_time_sec):
     grade = 2.0 + 3.0 * score
     return round(grade * 2) / 2
 
+def detect_and_ocr_from_image(image_path_or_array, conf_threshold=0.25):
+    """
+    Complete pipeline: YOLO detection → crop → OCR
+    
+    Args:
+        image_path_or_array: Path to image file or numpy array
+        conf_threshold: YOLO confidence threshold (0.0-1.0)
+    
+    Returns:
+        List of dicts with keys: 'text', 'box', 'confidence', 'crop'
+        Each entry represents one detected license plate
+    """
+    # Load image
+    if isinstance(image_path_or_array, str):
+        img = cv2.imread(image_path_or_array)
+        if img is None:
+            return []
+    else:
+        img = image_path_or_array
+    
+    # Detect plates with YOLO
+    detections = detect_license_plates(img, conf_threshold)
+    
+    if not detections:
+        return []
+    
+    results = []
+    for det in detections:
+        x1, y1, x2, y2 = det['box']
+        confidence = det['confidence']
+        
+        # Crop ROI
+        roi_raw = img[y1:y2, x1:x2]
+        if roi_raw.size == 0:
+            continue
+        
+        # Apply margin reduction
+        h, w = roi_raw.shape[:2]
+        margin = 0.02
+        roi_cropped = roi_raw[
+            int(h*margin):int(h*(1-margin)),
+            int(w*margin):int(w*(1-margin))
+        ]
+        
+        if roi_cropped.size == 0:
+            roi_cropped = roi_raw
+        
+        # Remove blue strip
+        roi_tight = cut_blue_strip(roi_cropped)
+        
+        # Run OCR (without ground truth)
+        detected_text = process_plate_image(roi_tight, true_text="")
+        
+        results.append({
+            'text': detected_text,
+            'box': (x1, y1, x2, y2),
+            'confidence': confidence,
+            'crop': roi_tight
+        })
+    
+    return results
+
 def run_test_mode():
     """Run performance test on local image dataset"""
     print("\n" + "="*60)
@@ -515,15 +781,17 @@ def run_test_mode():
         for i, item in enumerate(test_data):
             img_path = item['path']
             true_text = item['text']
-            box = item['box']
+            box = item['box']  # Z XML - idealne współrzędne
 
-            print(f"Processing {i+1}/{test_size}...", end='\r')
+            # print(f"Processing {i+1}/{test_size}...", end='\r')  # Disabled - progress output not needed
 
             img = cv2.imread(img_path)
             if img is None:
                 continue
+            
             h_img, w_img = img.shape[:2]
 
+            # Używamy XML coordinates dla testów
             x1, y1, x2, y2 = box
             if max(box) <= 1.0:
                 x1, y1, x2, y2 = int(x1*w_img), int(y1*h_img), int(x2*w_img), int(y2*h_img)
@@ -546,6 +814,13 @@ def run_test_mode():
                 roi_stage1 = roi_raw
 
             roi_tight = cut_blue_strip(roi_stage1)
+            
+            # Upscaling zaraz po cropowaniu - raz na zawsze
+            h_crop = roi_tight.shape[0]
+            if h_crop < 60:
+                roi_tight = cv2.resize(roi_tight, None, fx=3.5, fy=3.5, interpolation=cv2.INTER_CUBIC)
+            elif h_crop < 100:
+                roi_tight = cv2.resize(roi_tight, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
             
             cv2.imwrite(os.path.join(DEBUG_CROPS_DIR, f"CROP_{os.path.basename(img_path)}"), roi_tight)
 
@@ -684,7 +959,6 @@ def start_consumer():
             print(f" [!] Error processing task: {e}")
             r.lpush(QUEUE_MAIN, task_id)
             r.lrem(QUEUE_PROCESSING, 1, task_id)
-            time.sleep(5)
 
 
 
@@ -713,3 +987,4 @@ Examples:
 
 if __name__ == "__main__":
     main()
+

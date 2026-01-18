@@ -25,7 +25,7 @@ async def enqueue_task(payload: AnalyzeRequest):
             "created_at": time.asctime()
         }
 
-        r.set(task_id, json.dumps(job_data), ex=3600) #3600
+        r.set(task_id, json.dumps(job_data), ex=3600) #3600 godzina na wygaśniecie
         r.lpush("AI_queue", task_id)
 
         return {"status": "success", "data": job_data}

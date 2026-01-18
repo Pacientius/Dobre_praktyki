@@ -6,11 +6,13 @@ from pydantic import BaseModel
 import sys
 import os
 import shutil
+import anyio
+import ocr_consumer
 
 app = FastAPI(title="Main_Api")
 
 class SaveADetails(BaseModel):
-    uid: str = "default_uuid_123"
+    uid: str = "TEST_UID_123"
     url: str = "https://elements-resized.envatousercontent.com/envato-dam-assets-production/EVA/TRX/01/1f/e6/44/b1/v1_E10/E102BHYV.jpg?w=500&cf_fit=scale-down&mark-alpha=18&mark=https%3A%2F%2Felements-assets.envato.com%2Fstatic%2Fwatermark4.png&q=85&format=auto&s=315bef5dfe9efe9bc22b1aeab148440c3b845f358d307881392adb7582596130"
     count: int = 1
 
@@ -18,7 +20,11 @@ class QueueBDetails(BaseModel):
     url: str = "https://elements-resized.envatousercontent.com/envato-dam-assets-production/EVA/TRX/01/1f/e6/44/b1/v1_E10/E102BHYV.jpg?w=500&cf_fit=scale-down&mark-alpha=18&mark=https%3A%2F%2Felements-assets.envato.com%2Fstatic%2Fwatermark4.png&q=85&format=auto&s=315bef5dfe9efe9bc22b1aeab148440c3b845f358d307881392adb7582596130"
 
 class QueueOCRDetails(BaseModel):
-    url: str = "https://example.com/license_plate.jpg"
+    url: str = "https://upload.wikimedia.org/wikipedia/commons/1/11/Tablica_rejestracyjna_waskie_znaki.jpg"
+
+
+class OCRDirectRequest(BaseModel):
+    url: str = "https://upload.wikimedia.org/wikipedia/commons/1/11/Tablica_rejestracyjna_waskie_znaki.jpg"
 
 @app.post("/save_A")
 async def service_A(payload: SaveADetails):
@@ -53,6 +59,26 @@ async def queue_ocr(payload: QueueOCRDetails):
             return resp.json()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Błąd komunikacji z Serwisem B (OCR): {str(e)}")
+
+
+@app.post("/ocr_direct",)
+async def ocr_direct(payload: OCRDirectRequest):
+    try:
+        plate = await anyio.to_thread.run_sync(
+            ocr_consumer.process_image_url,
+            payload.url,
+            None,
+            False,
+        )
+
+        if not plate:
+            raise HTTPException(status_code=422, detail="Nie udało się odczytać tablicy z obrazu")
+
+        return {"status": "success", "plate_number": plate, "source_url": payload.url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd OCR: {str(e)}")
 
 
 @app.get("/status_B/{task_id}")
@@ -120,7 +146,7 @@ async def health_check_b():
         raise HTTPException(status_code=503, detail="Service B unhealthy")
 
 
-@app.post("/cleanup_tmp", name="Czyszczenie katalogu .tmp")
+'''@app.post("/cleanup_tmp", name="Czyszczenie katalogu .tmp")
 async def cleanup_tmp():
     """Clean up downloaded images and debug files from .tmp directory"""
     try:
@@ -154,10 +180,10 @@ async def cleanup_tmp():
             "message": f"Cleaned up {files_removed} files, freed {round(total_size / (1024 * 1024), 2)} MB"
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")'''
 
 
-@app.get("/tmp_status", name="Status katalogu .tmp")
+'''@app.get("/tmp_status", name="Status katalogu .tmp")
 async def tmp_status():
     """Get information about .tmp directory contents"""
     try:
@@ -190,5 +216,5 @@ async def tmp_status():
             "file_types": file_types
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Status check failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Status check failed: {str(e)}")'''
 
